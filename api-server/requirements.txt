@@ -1,0 +1,10 @@
+flask
+langchain
+openai
+faiss-cpu
+PyPDF2
+tiktoken
+sentence-transformers
+huggingface_hub
+python-dotenv
+gunicorn

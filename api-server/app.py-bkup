@@ -1,0 +1,102 @@
+
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+from flask import Flask, request, jsonify
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_community.vectorstores import FAISS
+from langchain.chains import ConversationalRetrievalChain
+
+
+# Save
+FAISS.save_local(vectorstore, "vectorstore_index")
+
+
+
+# =============================
+# CONFIG
+# =============================
+app = Flask(__name__)
+os.environ["OPENAI_API_KEY"] = "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"
+
+# Global variables
+vectorstore = None
+qa_chain = None
+chat_history = []
+
+# =============================
+# Helper: Build Vector Store from PDF
+# =============================
+def build_vector_store(pdf_path):
+    print(f"Loading PDF: {pdf_path}")
+    loader = PyPDFLoader(pdf_path)
+    docs = loader.load()
+
+    # Split text
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    split_docs = text_splitter.split_documents(docs)
+
+    # Embeddings
+    embeddings = OpenAIEmbeddings()
+    store = FAISS.from_documents(split_docs, embeddings)
+    store.save_local("vectorstore")  # save for reuse
+    return store
+
+# =============================
+# Routes
+# =============================
+
+@app.route("/upload", methods=["POST"])
+def upload_pdf():
+    """Upload a PDF file and build the vector index"""
+    global vectorstore, qa_chain
+
+    file = request.files.get("file")
+    if not file:
+        return jsonify({"error": "No PDF file provided"}), 400
+
+    pdf_path = os.path.join("data", file.filename)
+    file.save(pdf_path)
+
+    vectorstore = build_vector_store(pdf_path)
+
+    llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
+    qa_chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
+    )
+
+    return jsonify({"message": f"PDF '{file.filename}' uploaded and processed successfully."})
+
+@app.route("/ask", methods=["POST"])
+def ask_question():
+    """Ask a question about the uploaded PDF"""
+    global qa_chain, chat_history
+
+    if not qa_chain:
+        return jsonify({"error": "Please upload a PDF first via /upload"}), 400
+
+    data = request.get_json()
+    question = data.get("question")
+
+    if not question:
+        return jsonify({"error": "Missing 'question' field"}), 400
+
+    result = qa_chain({"question": question, "chat_history": chat_history})
+    chat_history.append((question, result["answer"]))
+
+    return jsonify({"answer": result["answer"]})
+
+
+@app.route("/healthcheck", methods=["GET"])
+def healthcheck():
+    return "OK", 200
+# =============================
+# MAIN
+# =============================
+if __name__ == "__main__":
+    os.makedirs("data", exist_ok=True)
+    print("Available routes:")
+    print(app.url_map)
+    app.run(host="0.0.0.0", port=5002, debug=True)

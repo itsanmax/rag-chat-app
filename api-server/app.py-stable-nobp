@@ -1,0 +1,212 @@
+import os
+import re
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_community.vectorstores import FAISS
+from langchain.chains import ConversationalRetrievalChain
+from dotenv import load_dotenv
+load_dotenv()  # Loads variables from .env into os.environ
+
+
+# --- Environment fix for OpenMP warning ---
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# --- API key ---
+# Make sure OPENAI_API_KEY is set in environment
+# export OPENAI_API_KEY="your_openai_api_key"
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("Please set OPENAI_API_KEY in environment variables.")
+
+# --- Flask setup ---
+app = Flask(__name__)
+
+# Allow React frontend (running on localhost:3001) to call Flask API
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})
+
+# --- Globals ---
+vectorstore = None
+chat_history = []
+VECTORSTORE_FILE = "vectorstore_index"  # Persistent index file
+EMBEDDINGS = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+
+# --- Load existing index if exists ---
+if os.path.exists(VECTORSTORE_FILE):
+    print("Loading existing FAISS vector store...")
+    vectorstore = FAISS.load_local(VECTORSTORE_FILE, EMBEDDINGS, allow_dangerous_deserialization=True)
+    qa_chain = ConversationalRetrievalChain.from_llm(
+        ChatOpenAI(openai_api_key=OPENAI_API_KEY, temperature=0),
+        vectorstore.as_retriever(),
+        return_source_documents=False
+    )
+    print("Vector store loaded.")
+else:
+    print("No existing FAISS vector store found. Upload a PDF to start.")
+
+# -----------------------------
+# Upload PDF endpoint
+# -----------------------------
+@app.route("/upload", methods=["POST"])
+def upload_pdf():
+    global vectorstore, qa_chain, chat_history
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "No selected file"}), 400
+
+    filepath = os.path.join("data", file.filename)
+    os.makedirs("data", exist_ok=True)
+    file.save(filepath)
+
+    print(f"Loading PDF: {filepath}")
+    loader = PyPDFLoader(filepath)
+    documents = loader.load()
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    docs = splitter.split_documents(documents)
+
+    vectorstore = FAISS.from_documents(docs, EMBEDDINGS)
+    vectorstore.save_local(VECTORSTORE_FILE)
+
+    # Recreate QA chain with new vectorstore
+    qa_chain = ConversationalRetrievalChain.from_llm(
+        ChatOpenAI(openai_api_key=OPENAI_API_KEY, temperature=0),
+        vectorstore.as_retriever(),
+        return_source_documents=False
+    )
+
+    # Reset chat history
+    chat_history = []
+
+    return jsonify({"message": f"PDF '{file.filename}' uploaded and processed successfully."})
+
+
+# -----------------------------
+# Multiple Upload PDF endpoint
+# -----------------------------
+# @app.route("/multiple_upload", methods=["POST"])
+# def multiple_upload_pdf():
+#     """
+#     Accepts one or more PDF files in a multipart/form-data POST request.
+#     """
+#     global vectorstore, qa_chain, chat_history
+
+#     if "files" not in request.files:
+#         return jsonify({"error": "No files part"}), 400
+
+#     files = request.files.getlist("files")
+#     if not files:
+#         return jsonify({"error": "No files provided"}), 400
+
+#     all_documents = []
+#     os.makedirs("data", exist_ok=True)
+
+#     for file in files:
+#         if file.filename == "":
+#             continue
+#         filepath = os.path.join("data", file.filename)
+#         file.save(filepath)
+#         print(f"Loading PDF: {filepath}")
+
+#         loader = PyPDFLoader(filepath)
+#         documents = loader.load()
+#         all_documents.extend(documents)
+
+#     if not all_documents:
+#         return jsonify({"error": "No valid PDF documents found"}), 400
+
+#     # Split documents into chunks
+#     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+#     docs = splitter.split_documents(all_documents)
+
+#     if vectorstore:
+#         # Append new documents to existing vectorstore
+#         vectorstore.add_documents(docs)
+#     else:
+#         vectorstore = FAISS.from_documents(docs, EMBEDDINGS)
+
+#     # Save vectorstore to disk for persistence
+#     vectorstore.save_local(VECTORSTORE_FILE)
+
+#     # Recreate QA chain with updated vectorstore
+#     qa_chain = ConversationalRetrievalChain.from_llm(
+#         ChatOpenAI(openai_api_key=OPENAI_API_KEY, temperature=0),
+#         vectorstore.as_retriever(),
+#         return_source_documents=False
+#     )
+
+#     chat_history = []  # Optional: reset chat history on new upload(s)
+
+#     uploaded_files = [file.filename for file in files]
+#     return jsonify({"message": f"Uploaded and processed PDFs: {uploaded_files}"})
+
+
+
+def parse_answer_to_list(answer_text):
+    """
+    Converts a numbered string answer into a list of dicts.
+    Example input:
+    "1. Name: Ram, Assets: 70000\n2. Name: Gopal, Assets: 159000"
+    Returns:
+    [
+        {"text": "Name: Ram, Assets: 70000"},
+        {"text": "Name: Gopal, Assets: 159000"}
+    ]
+    """
+    # Split by numbers like 1., 2., etc.
+    items = re.split(r'\d+\.\s+', answer_text)
+    # Remove empty strings
+    items = [item.strip() for item in items if item.strip()]
+    # Wrap each item in dict
+    return [{"text": item} for item in items]
+
+
+
+# -----------------------------
+# Ask question endpoint
+# -----------------------------
+@app.route("/ask", methods=["POST"])
+def ask_question():
+    global chat_history
+
+    if vectorstore is None:
+        return jsonify({"error": "Please upload a PDF first via /upload"}), 400
+
+    data = request.get_json()
+    question = data.get("question", "").strip()
+    if question == "":
+        return jsonify({"error": "Question is empty"}), 400
+
+    result = qa_chain.invoke({"question": question, "chat_history": chat_history})
+
+    chat_history.append((question, result["answer"]))
+
+    return jsonify({"answer": result["answer"]})
+
+    # Convert string answer into a nested JSON list
+    #structured_answer = parse_answer_to_list(result["answer"])
+
+    #return jsonify({"answer": structured_answer})
+
+# -----------------------------
+# Healthcheck endpoint
+# -----------------------------
+@app.route("/healthcheck", methods=["GET"])
+def healthcheck():
+    return "OK", 200
+
+
+# -----------------------------
+# Run Flask
+# -----------------------------
+if __name__ == "__main__":
+    print("Available routes:")
+    print(app.url_map)
+    os.makedirs("data", exist_ok=True)
+    app.run(host="0.0.0.0", port=5001, debug=True)

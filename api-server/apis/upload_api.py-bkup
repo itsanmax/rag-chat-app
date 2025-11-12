@@ -1,0 +1,47 @@
+from flask import Blueprint, request, jsonify
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+from langchain.chains import ConversationalRetrievalChain
+import os
+
+# Blueprint for upload
+upload_bp = Blueprint("upload_bp", __name__)
+
+# Import global variables from app.py
+from app import EMBEDDINGS, VECTORSTORE_FILE, vectorstore, qa_chain, chat_history
+
+@upload_bp.route("/upload", methods=["POST"])
+def upload_pdf():
+    global vectorstore, qa_chain, chat_history
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "No selected file"}), 400
+
+    filepath = os.path.join("data", file.filename)
+    os.makedirs("data", exist_ok=True)
+    file.save(filepath)
+
+    loader = PyPDFLoader(filepath)
+    documents = loader.load()
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    docs = splitter.split_documents(documents)
+
+    vectorstore = FAISS.from_documents(docs, EMBEDDINGS)
+    vectorstore.save_local(VECTORSTORE_FILE)
+
+    qa_chain = ConversationalRetrievalChain.from_llm(
+        qa_chain.llm if qa_chain else None,
+        vectorstore.as_retriever(),
+        return_source_documents=False
+    )
+
+    chat_history = []
+
+    return jsonify({"message": f"PDF '{file.filename}' uploaded and processed successfully."})

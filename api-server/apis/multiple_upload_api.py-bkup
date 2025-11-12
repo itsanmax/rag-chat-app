@@ -1,0 +1,50 @@
+from flask import Blueprint, request, jsonify
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings
+from langchain.chains import ConversationalRetrievalChain
+import os
+
+multiple_upload_bp = Blueprint("multiple_upload_bp", __name__)
+
+from app import EMBEDDINGS, VECTORSTORE_FILE, vectorstore, qa_chain, chat_history
+
+@multiple_upload_bp.route("/multiple_upload", methods=["POST"])
+def multiple_upload():
+    global vectorstore, qa_chain, chat_history
+
+    if "files" not in request.files:
+        return jsonify({"error": "No files part"}), 400
+
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "No files selected"}), 400
+
+    all_docs = []
+    os.makedirs("data", exist_ok=True)
+    for file in files:
+        filepath = os.path.join("data", file.filename)
+        file.save(filepath)
+        loader = PyPDFLoader(filepath)
+        all_docs.extend(loader.load())
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    docs = splitter.split_documents(all_docs)
+
+    if vectorstore:
+        vectorstore.add_documents(docs)
+    else:
+        vectorstore = FAISS.from_documents(docs, EMBEDDINGS)
+
+    vectorstore.save_local(VECTORSTORE_FILE)
+
+    qa_chain = ConversationalRetrievalChain.from_llm(
+        qa_chain.llm if qa_chain else None,
+        vectorstore.as_retriever(),
+        return_source_documents=False
+    )
+
+    chat_history = []
+
+    return jsonify({"message": f"Uploaded and processed PDFs: {[f.filename for f in files]}"})

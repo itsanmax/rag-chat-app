@@ -1,0 +1,55 @@
+# from flask import Blueprint, request, jsonify
+# import gspread
+# from google.oauth2.service_account import Credentials
+# from langchain_community.vectorstores import FAISS
+# from langchain.text_splitter import RecursiveCharacterTextSplitter
+# from langchain.schema import Document
+# from langchain_openai import OpenAIEmbeddings
+# import os
+
+# upload_google_sheet_bp = Blueprint('upload_google_sheet_bp', __name__)
+
+# # Environment setup
+# VECTORSTORE_FILE = "vectorstore/faiss_index"
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# EMBEDDINGS = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+
+# def fetch_google_sheet(sheet_id, worksheet_name="Sheet1"):
+#     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+#     creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+#     client = gspread.authorize(creds)
+#     sheet = client.open_by_key(sheet_id).worksheet(worksheet_name)
+#     data = sheet.get_all_values()
+#     text_data = "\n".join([" | ".join(row) for row in data])
+
+#     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+#     docs = splitter.create_documents([text_data])
+#     return docs
+
+# @upload_google_sheet_bp.route("/upload_google_sheet", methods=["POST"])
+# def upload_google_sheet():
+#     try:
+#         content = request.json
+#         sheet_id = content.get("sheet_id")
+#         worksheet_name = content.get("worksheet_name", "Sheet1")
+
+#         if not sheet_id:
+#             return jsonify({"error": "Missing 'sheet_id' in request body"}), 400
+
+#         docs = fetch_google_sheet(sheet_id, worksheet_name)
+
+#         if os.path.exists(VECTORSTORE_FILE):
+#             vectorstore = FAISS.load_local(VECTORSTORE_FILE, EMBEDDINGS, allow_dangerous_deserialization=True)
+#             vectorstore.add_documents(docs)
+#         else:
+#             vectorstore = FAISS.from_documents(docs, EMBEDDINGS)
+
+#         vectorstore.save_local(VECTORSTORE_FILE)
+
+#         return jsonify({
+#             "message": f"Google Sheet '{worksheet_name}' uploaded and processed successfully.",
+#             "rows_processed": len(docs)
+#         })
+
+#     except Exception as e:
+#         return jsonify({"error": str(e)}), 500
